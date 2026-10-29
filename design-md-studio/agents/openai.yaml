@@ -1,0 +1,4 @@
+interface:
+  display_name: "Design MD Studio"
+  short_description: "Review, edit, and approve a minimal design system"
+  default_prompt: "Use $design-md-studio to review the project design system or prepare a draft, preview tokens, collect edits and comments, and wait for my confirmation before saving DESIGN.md."

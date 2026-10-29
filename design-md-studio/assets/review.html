@@ -1,0 +1,273 @@
+<div id="design-md-studio-review">
+  <style>
+    #design-md-studio-review .dms-groups { display:grid; gap:1rem; }
+    #design-md-studio-review .dms-entry { display:grid; gap:.5rem; margin-block:1rem; }
+    #design-md-studio-review .dms-columns { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,16rem),1fr)); gap:1rem; }
+    #design-md-studio-review pre,#design-md-studio-review code { white-space:pre-wrap; overflow-wrap:anywhere; }
+    #design-md-studio-review .dms-swatch { display:inline-block; width:3rem; height:1.5rem; vertical-align:middle; }
+    #design-md-studio-review .dms-specimen { padding:1.25rem; background:var(--dms-bg); color:var(--dms-fg); border-radius:var(--dms-radius,0); }
+    #design-md-studio-review .dms-sample-button { padding:.5rem 1rem; border:0; background:var(--dms-primary); color:var(--dms-primary-fg); border-radius:var(--dms-radius,0); }
+    #design-md-studio-review .dms-sample-muted { background:var(--dms-muted); color:var(--dms-muted-fg); padding:var(--dms-space,0); }
+    #design-md-studio-review .dms-sample-body { margin-block:1rem; }
+  </style>
+  <h3 data-label="title"></h3>
+  <p id="dms-status" role="status" aria-live="polite"></p>
+  <div id="dms-preview" class="dms-columns"></div>
+  <hr>
+  <div id="dms-groups" class="dms-groups"></div>
+  <label class="form-label"><span data-label="general"></span><textarea id="dms-general" class="form-control" rows="3"></textarea></label>
+  <div class="viz-controls">
+    <button type="button" id="dms-submit" class="btn btn-primary" data-label="submit"></button>
+  </div>
+  <details id="dms-copy-details">
+    <summary data-label="copy"></summary>
+    <label class="form-label"><span data-label="payload"></span><textarea id="dms-payload" class="form-control" rows="8" readonly></textarea></label>
+  </details>
+  <script>
+  (() => {
+    const data = /*STUDIO_DATA*/ {};
+    const root = document.getElementById('design-md-studio-review');
+    const thai = data.locale === 'th';
+    const labels = Object.assign(thai ? {
+      draft:'ฉบับร่าง ยังไม่บันทึก DESIGN.md', general:'ความคิดเห็นรวม', submit:'ส่งร่างเพื่อทบทวน',
+      copy:'ข้อมูลร่างสำหรับคัดลอก', payload:'คัดลอกข้อความนี้กลับมาในแชทได้', include:'ใช้ในร่าง',
+      path:'ชื่อหรือ path', original:'ค่าเดิม', value:'ค่าร่าง', comment:'ความคิดเห็น', section:'ความคิดเห็นต่อหมวด',
+      specimen:'ตัวอย่าง', sample:'ข้อความตัวอย่างสำหรับตรวจฟอนต์และระยะบรรทัด', button:'ปุ่มตัวอย่าง',
+      muted:'ข้อความรองตัวอย่าง', missing:'ยังไม่ได้กำหนด', invalid:'ค่าร่างไม่ถูกต้อง', sent:'ส่งเพื่อทบทวนแล้ว ยังไม่ใช่การอนุมัติบันทึก',
+      fallback:'ส่งกลับอัตโนมัติไม่ได้ โปรดคัดลอกข้อมูลร่างกลับมาในแชท', storage:'ไม่สามารถจำการแก้ไขข้ามการเปิดได้ ใช้ข้อมูลร่างสำหรับคัดลอก',
+      empty:'ยังไม่มีค่าที่ตกลงไว้ สามารถคอมเมนต์เพื่อกำหนดข้อมูลเริ่มต้นได้'
+    } : {
+      draft:'Draft — DESIGN.md has not been saved', general:'General comment', submit:'Submit draft for review',
+      copy:'Copy review data', payload:'Copy this complete payload back into the chat', include:'Include in draft',
+      path:'Name or path', original:'Original value', value:'Draft value', comment:'Comment', section:'Section comment',
+      specimen:'Specimen', sample:'Sample text for reviewing typography and line height', button:'Sample button',
+      muted:'Sample secondary text', missing:'Not specified', invalid:'Invalid draft value', sent:'Submitted for review; saving has not been approved',
+      fallback:'Automatic feedback is unavailable. Copy the review data back into the chat.', storage:'Edits cannot be remembered across opens. Use the complete copy payload.',
+      empty:'No values have been decided. Add comments to establish the starting system.'
+    }, data.labels || {});
+    const clone = value => JSON.parse(JSON.stringify(value));
+    const originals = new Map(data.tokens.map(item => [item.id, item]));
+    let state = {base_revision:data.base_revision, edit_revision:0, tokens:data.tokens.map(item => ({...clone(item), included:true, comment:''})), section_comments:{}, general_comment:''};
+    const inputs = new Map();
+    const errors = new Map();
+    let persistenceNote = '';
+    const status = root.querySelector('#dms-status');
+    const output = root.querySelector('#dms-payload');
+    const submit = root.querySelector('#dms-submit');
+    function node(tag, text, className) {
+      const element = document.createElement(tag);
+      if (text !== undefined) element.textContent = text;
+      if (className) element.className = className;
+      return element;
+    }
+    function label(text, control) {
+      const element = node('label', undefined, 'form-label');
+      element.append(node('span', text), control); return element;
+    }
+    root.querySelectorAll('[data-label]').forEach(element => {
+      const key = element.getAttribute('data-label');
+      element.textContent = key === 'title' ? data.title : labels[key];
+    });
+    const asText = value => typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
+    function resolved(item) {
+      function visit(value, trail, theme) {
+        if (typeof value === 'string') {
+          const reference = value.match(/^\{([\w-]+(?:\.[\w-]+)+)\}$/);
+          if (!reference) return value;
+          const path = reference[1];
+          if (trail.has(path)) throw new Error('Circular reference: '+path);
+          const qualified = entry => entry.theme && path.split('.').some(part => part === entry.theme || part.startsWith(entry.theme+'-') || part.endsWith('-'+entry.theme));
+          const candidates = state.tokens.filter(entry => entry.included && (path === entry.path || path.startsWith(entry.path+'.')) && (!entry.theme || entry.theme === theme || qualified(entry)));
+          const priority = entry => entry.theme === theme ? 2 : !entry.theme ? 1 : 0;
+          candidates.sort((a,b) => b.path.length-a.path.length || priority(b)-priority(a));
+          const target = candidates[0];
+          if (!target || errors.has(target.id)) throw new Error('Unresolved reference: '+path);
+          if (candidates[1]?.path === target.path && priority(candidates[1]) === priority(target)) throw new Error('Ambiguous reference: '+path);
+          let targetValue = target.value;
+          for (const key of path.slice(target.path.length).split('.').filter(Boolean)) targetValue=targetValue?.[key];
+          if (targetValue === undefined) throw new Error('Unresolved reference: '+path);
+          return visit(targetValue,new Set([...trail,path]),target.theme || theme);
+        }
+        if (value && typeof value === 'object' && !Array.isArray(value)) return Object.fromEntries(Object.entries(value).map(([key,child]) => [key,visit(child,new Set(trail),theme)]));
+        return value;
+      }
+      return visit(item.value,new Set([item.path]),item.theme);
+    }
+    function parseDraftValue(original, group, text) {
+      const trimmed=text.trim();
+      if(/^\{[\w-]+(?:\.[\w-]+)+\}$/.test(trimmed) && group!=='prose') return trimmed;
+      if(typeof original==='object' || ['typography','components'].includes(group)) return JSON.parse(text);
+      return typeof original==='number' ? (trimmed ? Number(text) : NaN) : text;
+    }
+    function valid(item) {
+      if (!item.path.trim()) return false;
+      if (item.group === 'prose') return typeof item.value === 'string';
+      let value; try {value=resolved(item);} catch {return false;}
+      if (item.group === 'colors') return typeof value === 'string' && CSS.supports('color', value);
+      if (item.group === 'rounded' || item.group === 'spacing') {
+        return typeof value === 'number' ? item.group === 'spacing' && Number.isFinite(value) : typeof value === 'string' && CSS.supports(item.group === 'rounded' ? 'border-radius' : 'gap', value);
+      }
+      if (item.group === 'typography') {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+        const properties = {fontFamily:'font-family',fontSize:'font-size',fontWeight:'font-weight',lineHeight:'line-height',letterSpacing:'letter-spacing',fontFeature:'font-feature-settings',fontVariation:'font-variation-settings'};
+        return Object.entries(value).every(([key,child]) => properties[key] && CSS.supports(properties[key], String(child)));
+      }
+      if (item.group === 'components') return value && typeof value === 'object' && !Array.isArray(value);
+      return typeof value === 'string';
+    }
+    function payload() {
+      return {...clone(data), ...clone(state), source_fingerprints:data.source_fingerprints};
+    }
+    function update() {
+      const invalid = state.tokens.filter(item => item.included && (errors.has(item.id) || !valid(item)));
+      submit.disabled = invalid.length > 0;
+      status.textContent = `${labels.draft} · ${data.base_revision} / ${state.edit_revision}` + (invalid.length ? ` · ${labels.invalid}: ${invalid.map(item => item.path).join(', ')}` : '') + (persistenceNote ? ` · ${persistenceNote}` : '');
+      output.value = invalid.length ? '' : JSON.stringify(payload(), null, 2);
+      state.tokens.forEach(item => {
+        const fields=inputs.get(item.id); if(!fields)return;
+        fields.value.setAttribute('aria-invalid',errors.has(item.id)||!valid(item)?'true':'false');
+        if(item.group==='colors') fields.swatch.style.backgroundColor=!errors.has(item.id)&&valid(item)?resolved(item):'transparent';
+      });
+      renderPreview();
+    }
+    function changed() {
+      state.edit_revision += 1; update();
+      const saved = {studio:state};
+      if (new TextEncoder().encode(JSON.stringify(saved)).length >= 15000 || !window.openai?.setWidgetState) {
+        persistenceNote = labels.storage; update(); return;
+      }
+      try {
+        Promise.resolve(window.openai.setWidgetState({privateContent:saved,modelContent:{base_revision:data.base_revision,edit_revision:state.edit_revision}})).catch(() => {
+          persistenceNote = labels.storage; update();
+        });
+      } catch {persistenceNote=labels.storage;update();}
+    }
+    function restore(saved) {
+      const candidate = saved?.privateContent?.studio || saved?.studio;
+      if (!candidate || candidate.base_revision !== data.base_revision || !Array.isArray(candidate.tokens)) return;
+      if (candidate.tokens.length !== data.tokens.length || new Set(candidate.tokens.map(item => item.id)).size !== originals.size || candidate.tokens.some(item => !originals.has(item.id))) return;
+      state.tokens = data.tokens.map(original => {
+        const edited = candidate.tokens.find(item => item.id === original.id);
+        return {...clone(original), path:typeof edited.path === 'string' ? edited.path : original.path, value:edited.value, included:edited.included !== false, comment:typeof edited.comment === 'string' ? edited.comment : ''};
+      });
+      state.edit_revision = Number.isSafeInteger(candidate.edit_revision) && candidate.edit_revision >= 0 ? candidate.edit_revision : 0;
+      state.general_comment = typeof candidate.general_comment === 'string' ? candidate.general_comment : '';
+      state.section_comments = Object.fromEntries(Object.entries(candidate.section_comments || {}).filter(([key,value]) => typeof value === 'string' && ['colors','typography','rounded','spacing','components','prose'].includes(key)));
+      errors.clear();
+      syncControls(); update();
+    }
+    function syncControls() {
+      state.tokens.forEach(item => {
+        const fields = inputs.get(item.id);
+        if (!fields) return;
+        fields.path.value = item.path; fields.value.value = asText(item.value); fields.comment.value = item.comment; fields.include.checked = item.included;
+      });
+      root.querySelector('#dms-general').value = state.general_comment;
+      root.querySelectorAll('[data-section]').forEach(element => element.value = state.section_comments[element.dataset.section] || '');
+    }
+    function renderPreview() {
+      const preview = root.querySelector('#dms-preview'); preview.replaceChildren();
+      const entries = new Map(state.tokens.filter(item => item.included && !errors.has(item.id) && valid(item)).map(item => [item.id,item]));
+      Object.entries(data.bindings || {}).forEach(([theme, bindings]) => {
+        const section = node('section'); section.append(node('h3', theme));
+        const sample = node('div', undefined, 'dms-specimen');
+        sample.setAttribute('aria-label', `${labels.specimen}: ${theme}`);
+        const values = {}; const missing = [];
+        for (const role of ['background','foreground','primary','primaryForeground','muted','mutedForeground']) {
+          const entry = entries.get(bindings[role]);
+          if (entry?.group === 'colors') values[role] = resolved(entry); else missing.push(role);
+        }
+        for(const role of ['body','radius','spacing']) {
+          const entry=entries.get(bindings[role]);
+          if(!entry || (role==='body' ? entry.group!=='typography' : typeof resolved(entry)!=='string')) missing.push(role);
+        }
+        section.append(node('p', missing.length ? `${labels.missing}: ${missing.join(', ')}` : labels.specimen, 'text-small'));
+        if (values.background && values.foreground) {
+          sample.style.setProperty('--dms-bg', values.background); sample.style.setProperty('--dms-fg', values.foreground);
+          const body = node('p', labels.sample, 'dms-sample-body');
+          const bodyEntry=entries.get(bindings.body);
+          const type = bodyEntry ? resolved(bodyEntry) : undefined;
+          if (type && typeof type === 'object') {
+            const properties = {fontFamily:'font-family',fontSize:'font-size',fontWeight:'font-weight',lineHeight:'line-height',letterSpacing:'letter-spacing',fontFeature:'font-feature-settings',fontVariation:'font-variation-settings'};
+            Object.entries(type).forEach(([key,value]) => {if (properties[key]) body.style.setProperty(properties[key], String(value));});
+          }
+          for (const [role, css] of [['radius','--dms-radius'],['spacing','--dms-space']]) {
+            const entry=entries.get(bindings[role]);
+            const value = entry ? resolved(entry) : undefined;
+            if (typeof value === 'string') sample.style.setProperty(css, value);
+          }
+          sample.append(body);
+          if (values.primary && values.primaryForeground) {
+            sample.style.setProperty('--dms-primary', values.primary); sample.style.setProperty('--dms-primary-fg', values.primaryForeground);
+            const button = node('button', labels.button, 'dms-sample-button'); button.type = 'button'; sample.append(button);
+          }
+          if (values.muted && values.mutedForeground) {
+            sample.style.setProperty('--dms-muted', values.muted); sample.style.setProperty('--dms-muted-fg', values.mutedForeground);
+            sample.append(node('p', labels.muted, 'dms-sample-muted'));
+          }
+          section.append(sample);
+        }
+        preview.append(section);
+      });
+    }
+    const groups = root.querySelector('#dms-groups');
+    if (!data.tokens.length) groups.append(node('p', labels.empty));
+    for (const group of ['prose','colors','typography','rounded','spacing','components']) {
+      const entries = state.tokens.filter(item => item.group === group);
+      if (!entries.length && group !== 'prose') continue;
+      const section = node('details'); section.open = group === 'colors' || group === 'prose';
+      section.append(node('summary', `${group} (${entries.length})`));
+      entries.forEach(item => {
+        const id = item.id;
+        const article = node('div', undefined, 'dms-entry');
+        article.append(node('strong', `${item.path}${item.theme ? ' · '+item.theme : ''}`));
+        article.append(node('div', [item.origin,item.source,item.usage].filter(Boolean).join(' · '), 'text-small'));
+        article.append(node('code', `${labels.original}: ${item.original_path} = ${asText(item.original_value)}`));
+        const include = node('input', undefined, 'form-check-input'); include.type = 'checkbox'; include.checked = true;
+        const includeLabel = node('label', undefined, 'form-check'); includeLabel.append(include,node('span',labels.include,'form-check-label')); article.append(includeLabel);
+        const path = node('input', undefined, 'form-control'); path.type = 'text'; path.value = item.path;
+        const value = node('textarea', undefined, 'form-control'); value.rows = typeof item.value === 'object' ? 5 : 2; value.value = asText(item.value);
+        const comment = node('textarea', undefined, 'form-control'); comment.rows = 2;
+        article.append(label(labels.path,path),label(labels.value,value),label(labels.comment,comment));
+        const swatch = node('span', undefined, 'dms-swatch'); swatch.setAttribute('aria-hidden','true');
+        if (item.group === 'colors') article.append(swatch);
+        inputs.set(id,{include,path,value,comment,swatch});
+        const current = () => state.tokens.find(entry => entry.id === id);
+        include.addEventListener('change', () => {current().included=include.checked;changed();});
+        path.addEventListener('input', () => {current().path=path.value;changed();});
+        comment.addEventListener('input', () => {current().comment=comment.value;changed();});
+        value.addEventListener('input', () => {
+          try {
+            const original = originals.get(id).value;
+            const parsed = parseDraftValue(original,item.group,value.value);
+            current().value=parsed;
+            errors.delete(id);
+          } catch { errors.set(id,true); }
+          value.setAttribute('aria-invalid', errors.has(id) ? 'true' : 'false');
+          if (item.group === 'colors') swatch.style.backgroundColor = errors.has(id) ? 'transparent' : String(current().value);
+          changed();
+        });
+        if (item.group === 'colors' && valid(item)) swatch.style.backgroundColor = resolved(item);
+        section.append(article);
+      });
+      const sectionComment = node('textarea', undefined, 'form-control'); sectionComment.rows=2; sectionComment.dataset.section=group;
+      sectionComment.addEventListener('input', () => {state.section_comments[group]=sectionComment.value;changed();});
+      section.append(label(labels.section,sectionComment)); groups.append(section);
+    }
+    root.querySelector('#dms-general').addEventListener('input', event => {state.general_comment=event.target.value;changed();});
+    submit.addEventListener('click', async () => {
+      update(); if (submit.disabled) return;
+      if (!window.openai?.sendFollowUpMessage) {status.textContent=labels.fallback;root.querySelector('#dms-copy-details').open=true;return;}
+      submit.disabled=true;
+      try {
+        await window.openai.sendFollowUpMessage({title:labels.submit,prompt:'Review these design-md-studio draft edits and comments. This submission does NOT approve writing files. Validate the base revision, reconcile the draft, and show changes before asking for approval.\n\n'+output.value});
+        status.textContent=labels.sent;
+      } catch {status.textContent=labels.fallback;root.querySelector('#dms-copy-details').open=true;}
+      finally {submit.disabled=false;}
+    });
+    window.addEventListener('openai:set_globals', event => restore(event.detail?.globals?.widgetState));
+    update(); restore(window.openai?.widgetState);
+    if (!window.openai?.setWidgetState) {persistenceNote=labels.storage;update();}
+  })();
+  </script>
+</div>

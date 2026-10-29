@@ -1,0 +1,37 @@
+// Standard-library regression checks for the exact functions shipped in the fragment.
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const source = fs.readFileSync(path.join(__dirname, '../assets/review.html'), 'utf8');
+const functions = ['resolved', 'parseDraftValue'].map(name => {
+  const match = source.match(new RegExp('    function '+name+'[\\s\\S]*?\\n    }'));
+  assert.ok(match, 'Missing production function: '+name);
+  return match[0];
+}).join('\n');
+const context = {state:{tokens:[]}, errors:new Map()};
+vm.createContext(context);
+vm.runInContext(functions,context);
+const token = (id,p,value,theme) => ({id,path:p,value,theme,included:true});
+const resolve = item => {context.state.tokens.push(item);return context.resolved(item);};
+assert.equal(context.parseDraftValue(2,'spacing','{spacing.base}'),'{spacing.base}');
+assert.equal(context.parseDraftValue(2,'spacing','3'),3);
+assert.equal(context.parseDraftValue('x','prose','{colors.brand}'),'{colors.brand}');
+assert.equal(context.parseDraftValue({},'typography','{"fontSize":"1rem"}').fontSize,'1rem');
+context.state.tokens=[token('base','spacing.base','1rem')];
+assert.equal(resolve(token('alias','spacing.alias','{spacing.base}')),'1rem');
+context.state.tokens=[token('brand','colors.brand','#123456','dark')];
+assert.throws(()=>resolve(token('light','colors.primary','{colors.brand}','light')),/Unresolved/);
+context.state.tokens=[token('brand','colors.dark-brand','#123456','dark')];
+assert.equal(resolve(token('light','colors.primary','{colors.dark-brand}','light')),'#123456');
+context.state.tokens=[token('shared','colors.brand','#123456')];
+assert.equal(resolve(token('light','colors.primary','{colors.brand}','light')),'#123456');
+context.state.tokens=[token('dark','colors.brand','#111111','dark'),token('light','colors.brand','#eeeeee','light')];
+assert.equal(resolve(token('alias','colors.primary','{colors.brand}','light')),'#eeeeee');
+context.state.tokens=[token('body','typography.body',{fontSize:'1rem',lineHeight:1.5})];
+assert.equal(resolve(token('size','typography.size','{typography.body.fontSize}')),'1rem');
+context.state.tokens=[token('a','colors.a','{colors.b}'),token('b','colors.b','{colors.a}')];
+assert.throws(()=>context.resolved(context.state.tokens[0]),/Circular/);
+context.state.tokens=[token('a','colors.dark-brand','#111111','dark'),token('b','colors.dark-primary','{colors.dark-brand}','dark')];
+assert.equal(resolve(token('outer','colors.cross','{colors.dark-primary}','light')),'#111111');
+console.log('Review logic regression checks passed: numeric/reference edits, theme isolation, explicit cross-theme targets, composite paths and cycles.');
